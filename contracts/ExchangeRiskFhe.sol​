@@ -1,0 +1,185 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import { FHE, euint32, ebool } from "@fhevm/solidity/lib/FHE.sol";
+import { SepoliaConfig } from "@fhevm/solidity/config/ZamaConfig.sol";
+
+contract ExchangeRiskFhe is SepoliaConfig {
+    struct EncryptedExchangeData {
+        uint256 reportId;
+        address exchange;
+        euint32 encryptedUserPositions;
+        euint32 encryptedLiquidityPool;
+        euint32 encryptedWithdrawalRequests;
+        euint32 encryptedLeverageRatio;
+        uint256 timestamp;
+    }
+
+    struct RiskAssessment {
+        string riskLevel;
+        string vulnerabilityType;
+        string recommendation;
+        bool isRevealed;
+    }
+
+    uint256 public reportCount;
+    mapping(uint256 => EncryptedExchangeData) public exchangeReports;
+    mapping(uint256 => RiskAssessment) public riskAssessments;
+    mapping(uint256 => uint256) private requestToReportId;
+
+    event ReportSubmitted(uint256 indexed reportId, address indexed exchange);
+    event AnalysisRequested(uint256 indexed reportId);
+    event AssessmentCompleted(uint256 indexed reportId);
+
+    modifier onlyExchange(uint256 reportId) {
+        require(msg.sender == exchangeReports[reportId].exchange, "Not exchange");
+        _;
+    }
+
+    function submitEncryptedReport(
+        euint32 userPositions,
+        euint32 liquidityPool,
+        euint32 withdrawalRequests,
+        euint32 leverageRatio
+    ) public {
+        reportCount += 1;
+        uint256 newId = reportCount;
+
+        exchangeReports[newId] = EncryptedExchangeData({
+            reportId: newId,
+            exchange: msg.sender,
+            encryptedUserPositions: userPositions,
+            encryptedLiquidityPool: liquidityPool,
+            encryptedWithdrawalRequests: withdrawalRequests,
+            encryptedLeverageRatio: leverageRatio,
+            timestamp: block.timestamp
+        });
+
+        riskAssessments[newId] = RiskAssessment({
+            riskLevel: "",
+            vulnerabilityType: "",
+            recommendation: "",
+            isRevealed: false
+        });
+
+        emit ReportSubmitted(newId, msg.sender);
+    }
+
+    function requestRiskAnalysis(uint256 reportId) public onlyExchange(reportId) {
+        require(!riskAssessments[reportId].isRevealed, "Already analyzed");
+
+        EncryptedExchangeData storage report = exchangeReports[reportId];
+        
+        bytes32[] memory ciphertexts = new bytes32[](4);
+        ciphertexts[0] = FHE.toBytes32(report.encryptedUserPositions);
+        ciphertexts[1] = FHE.toBytes32(report.encryptedLiquidityPool);
+        ciphertexts[2] = FHE.toBytes32(report.encryptedWithdrawalRequests);
+        ciphertexts[3] = FHE.toBytes32(report.encryptedLeverageRatio);
+
+        uint256 reqId = FHE.requestDecryption(ciphertexts, this.assessSystemicRisk.selector);
+        requestToReportId[reqId] = reportId;
+
+        emit AnalysisRequested(reportId);
+    }
+
+    function assessSystemicRisk(
+        uint256 requestId,
+        bytes memory cleartexts,
+        bytes memory proof
+    ) public {
+        uint256 reportId = requestToReportId[requestId];
+        require(reportId != 0, "Invalid request");
+
+        RiskAssessment storage assessment = riskAssessments[reportId];
+        require(!assessment.isRevealed, "Already analyzed");
+
+        FHE.checkSignatures(requestId, cleartexts, proof);
+
+        (uint32 positions, 
+         uint32 liquidity, 
+         uint32 withdrawals, 
+         uint32 leverage) = abi.decode(cleartexts, (uint32, uint32, uint32, uint32));
+        
+        (assessment.riskLevel,
+         assessment.vulnerabilityType,
+         assessment.recommendation) = _calculateRisk(positions, liquidity, withdrawals, leverage);
+        
+        assessment.isRevealed = true;
+
+        emit AssessmentCompleted(reportId);
+    }
+
+    function _calculateRisk(
+        uint32 positions,
+        uint32 liquidity,
+        uint32 withdrawals,
+        uint32 leverage
+    ) private pure returns (
+        string memory,
+        string memory,
+        string memory
+    ) {
+        string memory riskLevel;
+        string memory vulnerability;
+        string memory recommendation;
+
+        uint32 withdrawalRatio = withdrawals * 100 / liquidity;
+        uint32 leverageRiskScore = leverage * positions / 100;
+
+        if (withdrawalRatio > 70 || leverageRiskScore > 80) {
+            riskLevel = "Critical";
+            vulnerability = "Liquidity Crisis";
+            recommendation = "Immediate liquidity injection required";
+        } else if (withdrawalRatio > 50 || leverageRiskScore > 60) {
+            riskLevel = "High";
+            vulnerability = "Potential Bank Run";
+            recommendation = "Increase reserve requirements";
+        } else if (withdrawalRatio > 30 || leverageRiskScore > 40) {
+            riskLevel = "Moderate";
+            vulnerability = "Elevated Risk";
+            recommendation = "Monitor closely";
+        } else {
+            riskLevel = "Low";
+            vulnerability = "Stable";
+            recommendation = "Normal operations";
+        }
+
+        return (riskLevel, vulnerability, recommendation);
+    }
+
+    function getRiskAssessment(uint256 reportId) public view returns (
+        string memory riskLevel,
+        string memory vulnerability,
+        string memory recommendation,
+        bool isRevealed
+    ) {
+        RiskAssessment storage r = riskAssessments[reportId];
+        return (r.riskLevel, r.vulnerabilityType, r.recommendation, r.isRevealed);
+    }
+
+    function calculateEncryptedRiskScore(
+        euint32 positions,
+        euint32 withdrawals,
+        euint32 liquidity
+    ) public pure returns (euint32) {
+        euint32 withdrawalRatio = FHE.div(
+            FHE.mul(withdrawals, FHE.asEuint32(100)),
+            liquidity
+        );
+        return FHE.add(
+            withdrawalRatio,
+            FHE.div(positions, FHE.asEuint32(10))
+        );
+    }
+
+    function checkEncryptedThreshold(
+        euint32 riskScore,
+        euint32 threshold
+    ) public pure returns (ebool) {
+        return FHE.gt(riskScore, threshold);
+    }
+
+    function getReportTimestamp(uint256 reportId) public view returns (uint256) {
+        return exchangeReports[reportId].timestamp;
+    }
+}
