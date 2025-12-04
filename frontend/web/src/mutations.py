@@ -1,0 +1,2 @@
+// Auto-generated file: D:\MyCode\zama\demo\frontend\web\src\mutations.py
+// Generated at: 2025-10-17T08:22:49.211Z
